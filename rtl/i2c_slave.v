@@ -1,15 +1,4 @@
 `timescale 1ns/1ps
-// i2c_slave.v
-//
-// Synthesizable I2C slave for Board S.
-//   1. 2-flop synchronizer + 4-clock glitch filter (40 ns at 100 MHz) on SCL/SDA
-//   2. Samples SDA on scl_rise, changes sda_low on scl_fall
-//   3. Never stretches SCL (no scl_low output)
-//   4. Register map:
-//        0x00-0xEF : 240-byte read/write memory (mem), pointer auto-increments
-//        0xF0      : WHO_AM_I (read-only parameter WHO)
-//        0xF1      : sw_in    (read-only Board S switches SW7-SW0)
-//        0xF2      : count    (read-only count of data bytes written)
 
 module i2c_slave #(
     parameter [6:0] ADDR = 7'h50,
@@ -34,7 +23,6 @@ module i2c_slave #(
 );
 
     // ---------- 1. Input conditioning ----------
-    // 2-flop sync + 4-sample glitch filter. Bus idles high, so reset to 1.
     reg [1:0] scl_sync;
     reg [1:0] scl_cnt;
     reg       scl_f, scl_f_d;
@@ -87,12 +75,12 @@ module i2c_slave #(
     wire sda_rise =  sda_f & ~sda_f_d;
     wire sda_fall = ~sda_f &  sda_f_d;
 
-    // START and STOP happen while SCL is high
+    // START / STOP detection
     wire start_det = scl_f & sda_fall;
     wire stop_det  = scl_f & sda_rise;
 
     // ---------- 2. Registers & Memory ----------
-    reg [7:0] mem [0:239];   // named 'mem' so tb_i2c_master can inspect slave0.mem[...]
+    reg [7:0] mem [0:239];
     reg [7:0] ptr;
     reg [7:0] count;
 
@@ -102,12 +90,17 @@ module i2c_slave #(
             mem[i] = 8'h00;
     end
 
-    wire [7:0] rd_raw = (ptr < 8'hF0)  ? mem[ptr] :
-                        (ptr == 8'hF0) ? WHO      :
-                        (ptr == 8'hF1) ? sw_in    :
-                        (ptr == 8'hF2) ? count    : 8'h00;
-
-    wire [7:0] rd_byte = invert ? ~rd_raw : rd_raw;
+    function [7:0] get_rd_byte;
+        input [7:0] p;
+        reg   [7:0] raw;
+        begin
+            raw = (p < 8'hF0)  ? mem[p] :
+                  (p == 8'hF0) ? WHO    :
+                  (p == 8'hF1) ? sw_in  :
+                  (p == 8'hF2) ? count  : 8'h00;
+            get_rd_byte = invert ? ~raw : raw;
+        end
+    endfunction
 
     // ---------- 3. State Machine ----------
     localparam S_IDLE   = 3'd0;
@@ -118,10 +111,10 @@ module i2c_slave #(
     localparam S_IGNORE = 3'd5;
 
     reg [2:0] state;
-    reg [3:0] bit_cnt;   // 0-7 data bits, 8 = ACK bit
+    reg [3:0] bit_cnt;
     reg [7:0] shreg;
-    reg       rw_bit;    // 0 = write, 1 = read
-    reg       m_nack;    // master's ACK/NACK response during TX
+    reg       rw_bit;
+    reg       m_nack;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -136,7 +129,6 @@ module i2c_slave #(
             sda_low   <= 1'b0;
             addressed <= 1'b0;
         end else if (start_det) begin
-            // START or repeated START from any state
             state     <= S_ADDR;
             bit_cnt   <= 4'd0;
             sda_low   <= 1'b0;
@@ -147,118 +139,100 @@ module i2c_slave #(
             addressed <= 1'b0;
         end else begin
 
-            // sample SDA on SCL rising edge
+            // RISING EDGE: Sample SDA
             if (scl_rise) begin
                 case (state)
                     S_ADDR, S_REG, S_RX: begin
-                        if (bit_cnt < 4'd8)
-                            shreg <= {shreg[6:0], sda_f};
+                        shreg   <= {shreg[6:0], sda_f};
+                        bit_cnt <= bit_cnt + 4'd1;
                     end
                     S_TX: begin
+                        bit_cnt <= bit_cnt + 4'd1;
                         if (bit_cnt == 4'd8)
-                            m_nack <= sda_f;   // 0 = master ACKed, 1 = master NACKed
+                            m_nack <= sda_f; // sample Master ACK/NACK
                     end
                     default: ;
                 endcase
             end
 
-            // drive SDA and transition states on SCL falling edge
+            // FALLING EDGE: Drive SDA & Transitions
             else if (scl_fall) begin
                 case (state)
 
                 S_ADDR: begin
-                    if (bit_cnt == 4'd7) begin
-                        // 8th bit just finished; check address and drive ACK
-                        bit_cnt <= 4'd8;
-                        if (shreg[7:1] == ADDR && !force_nack) begin
-                            sda_low   <= 1'b1;
+                    if (bit_cnt == 4'd8) begin
+                        // 8 bits received; check address
+                        if ((shreg[7:1] == ADDR) && !force_nack) begin
+                            sda_low   <= 1'b1; // ACK
                             addressed <= 1'b1;
                             rw_bit    <= shreg[0];
-                            if (shreg[0])
-                                ptr <= (ptr == 8'hEF) ? 8'h00 : ptr; // keep ptr ready for read
                         end else begin
                             sda_low   <= 1'b0;
                             addressed <= 1'b0;
                             state     <= S_IGNORE;
                         end
-                    end else if (bit_cnt == 4'd8) begin
-                        // end of address ACK clock
+                    end else if (bit_cnt == 4'd9) begin
+                        // ACK bit finished
                         bit_cnt <= 4'd0;
                         if (rw_bit) begin
                             state   <= S_TX;
-                            shreg   <= rd_byte;
-                            sda_low <= ~rd_byte[7]; // put MSB on SDA immediately
+                            shreg   <= get_rd_byte(ptr);
+                            sda_low <= ~get_rd_byte_msb(ptr); // Drive bit 7
                         end else begin
                             state   <= S_REG;
                             sda_low <= 1'b0;
                         end
-                    end else begin
-                        bit_cnt <= bit_cnt + 4'd1;
                     end
                 end
 
                 S_REG: begin
-                    if (bit_cnt == 4'd7) begin
-                        bit_cnt <= 4'd8;
+                    if (bit_cnt == 4'd8) begin
                         if (!force_nack) begin
                             ptr     <= shreg;
-                            sda_low <= 1'b1;        // ACK the register byte
+                            sda_low <= 1'b1; // ACK
                         end else begin
                             sda_low <= 1'b0;
                             state   <= S_IGNORE;
                         end
-                    end else if (bit_cnt == 4'd8) begin
+                    end else if (bit_cnt == 4'd9) begin
                         bit_cnt <= 4'd0;
                         sda_low <= 1'b0;
                         state   <= S_RX;
-                    end else begin
-                        bit_cnt <= bit_cnt + 4'd1;
                     end
                 end
 
                 S_RX: begin
-                    if (bit_cnt == 4'd7) begin
-                        bit_cnt <= 4'd8;
+                    if (bit_cnt == 4'd8) begin
                         if (!force_nack) begin
                             if (ptr < 8'hF0)
                                 mem[ptr] <= shreg;
                             last_byte <= shreg;
                             count     <= count + 8'd1;
                             ptr       <= ptr + 8'd1;
-                            sda_low   <= 1'b1;      // ACK the data byte
+                            sda_low   <= 1'b1; // ACK
                         end else begin
-                            sda_low   <= 1'b0;
-                            state     <= S_IGNORE;
+                            sda_low <= 1'b0;
+                            state   <= S_IGNORE;
                         end
-                    end else if (bit_cnt == 4'd8) begin
+                    end else if (bit_cnt == 4'd9) begin
                         bit_cnt <= 4'd0;
-                        sda_low <= 1'b0;            // release SDA for next byte or STOP
-                    end else begin
-                        bit_cnt <= bit_cnt + 4'd1;
+                        sda_low <= 1'b0;
                     end
                 end
 
                 S_TX: begin
-                    if (bit_cnt < 4'd7) begin
-                        // shift out bits 6 down to 0
-                        bit_cnt <= bit_cnt + 4'd1;
-                        shreg   <= {shreg[6:0], 1'b0};
-                        sda_low <= ~shreg[6];
-                    end else if (bit_cnt == 4'd7) begin
-                        // finished sending bit 0; release SDA so master can ACK/NACK
-                        bit_cnt <= 4'd8;
-                        sda_low <= 1'b0;
-                    end else begin
-                        // end of 9th clock (master ACK/NACK)
+                    if (bit_cnt < 4'd8) begin
+                        sda_low <= ~shreg[7 - bit_cnt]; // drive bits 6..0
+                    end else if (bit_cnt == 4'd8) begin
+                        sda_low <= 1'b0; // release for Master ACK/NACK
+                    end else if (bit_cnt == 4'd9) begin
                         bit_cnt <= 4'd0;
                         if (!m_nack) begin
-                            // master ACKed: advance pointer and drive MSB of next byte
-                            // Note: rd_byte uses ptr, so compute next byte from ptr + 1
+                            // Master ACK: advance pointer and drive next MSB
                             ptr     <= ptr + 8'd1;
-                            shreg   <= next_rd_byte(ptr + 8'd1);
-                            sda_low <= ~next_rd_byte_msb(ptr + 8'd1);
+                            shreg   <= get_rd_byte(ptr + 8'd1);
+                            sda_low <= ~get_rd_byte_msb(ptr + 8'd1);
                         end else begin
-                            // master NACKed: release SDA and wait for STOP / repeated START
                             sda_low <= 1'b0;
                             state   <= S_IGNORE;
                         end
@@ -278,25 +252,12 @@ module i2c_slave #(
         end
     end
 
-    // helper functions to fetch the next read byte on the same clock ptr increments
-    function [7:0] next_rd_byte;
-        input [7:0] p;
-        reg   [7:0] raw;
-        begin
-            raw = (p < 8'hF0)  ? mem[p] :
-                  (p == 8'hF0) ? WHO    :
-                  (p == 8'hF1) ? sw_in  :
-                  (p == 8'hF2) ? count  : 8'h00;
-            next_rd_byte = invert ? ~raw : raw;
-        end
-    endfunction
-
-    function next_rd_byte_msb;
+    function get_rd_byte_msb;
         input [7:0] p;
         reg   [7:0] b;
         begin
-            b = next_rd_byte(p);
-            next_rd_byte_msb = b[7];
+            b = get_rd_byte(p);
+            get_rd_byte_msb = b[7];
         end
     endfunction
 

@@ -1,8 +1,4 @@
 `timescale 1ns/1ps
-// tb_i2c_slave.v
-//
-// Ring 1 self-checking testbench for i2c_slave.v.
-// Bit-bangs SCL and SDA at 100 kHz (Q = 2500 ns) and verifies all 8 checks.
 
 module tb_i2c_slave;
 
@@ -20,10 +16,10 @@ module tb_i2c_slave;
     wire [7:0] last_byte;
     wire       addressed;
 
-    wire scl = ~m_scl_low;                    // slave never drives SCL
-    wire sda = ~(m_sda_low | s_sda_low);      // wired-AND with pull-up
+    wire scl = ~m_scl_low;
+    wire sda = ~(m_sda_low | s_sda_low);
 
-    localparam Q = 2500;                      // quarter of a 100 kHz bit (ns)
+    localparam Q = 2500; // quarter of 100 kHz period (ns)
 
     i2c_slave #(
         .ADDR(7'h50),
@@ -41,7 +37,6 @@ module tb_i2c_slave;
         .addressed (addressed)
     );
 
-    // ---------- bit-bang tasks ----------
     task bb_start;
         begin
             m_sda_low = 1; #Q;
@@ -78,7 +73,7 @@ module tb_i2c_slave;
 
     task bb_write_byte;
         input  [7:0] data;
-        output       ack;   // 1 = ACKed (SDA pulled low), 0 = NACKed
+        output       ack;
         integer k;
         reg     r;
         begin
@@ -90,7 +85,7 @@ module tb_i2c_slave;
     endtask
 
     task bb_read_byte;
-        input        send_ack;   // 1 = master ACKs, 0 = master NACKs
+        input        send_ack;
         output [7:0] data;
         integer k;
         reg     r;
@@ -103,13 +98,12 @@ module tb_i2c_slave;
         end
     endtask
 
-    // ---------- check helper ----------
     integer pass_cnt = 0;
     integer fail_cnt = 0;
 
     task check;
         input         cond;
-        input [255:0] msg;
+        input [511:0] msg;
         begin
             if (cond) begin
                 $display("  [PASS] %0s", msg);
@@ -121,7 +115,6 @@ module tb_i2c_slave;
         end
     endtask
 
-    // ---------- main test sequence ----------
     reg       ack;
     reg [7:0] rdata0, rdata1, rdata2;
     integer   k;
@@ -146,7 +139,7 @@ module tb_i2c_slave;
         check(ack == 1'b0 && addressed == 1'b0, "1b: 0x42+W NACKed and addressed=0");
         bb_stop;
 
-        // 2. Write 3 bytes at register 0x10, then read them back through repeated START
+        // 2. Write 3 bytes at 0x10, then read them back through repeated START
         bb_start;
         bb_write_byte({7'h50, 1'b0}, ack);
         bb_write_byte(8'h10, ack);
@@ -161,15 +154,15 @@ module tb_i2c_slave;
         bb_write_byte(8'h10, ack);
         bb_restart;
         bb_write_byte({7'h50, 1'b1}, ack);
-        bb_read_byte(1'b1, rdata0);   // ACK
-        bb_read_byte(1'b1, rdata1);   // ACK
-        bb_read_byte(1'b0, rdata2);   // NACK last byte
+        bb_read_byte(1'b1, rdata0);
+        bb_read_byte(1'b1, rdata1);
+        bb_read_byte(1'b0, rdata2);
         check(s_sda_low == 1'b0, "8: SDA released after master NACKs last read byte");
         bb_stop;
         check(rdata0 == 8'hDE && rdata1 == 8'hAD && rdata2 == 8'hBE,
               "2b: Read back 3 bytes (DE, AD, BE) via repeated START");
 
-        // 3. 0xF0 reads 0xC1; 0xF1 reads sw_in (0xA5); 0xF2 counts bytes written (3)
+        // 3. 0xF0 reads 0xC1; 0xF1 reads sw_in; 0xF2 counts bytes written
         bb_start;
         bb_write_byte({7'h50, 1'b0}, ack);
         bb_write_byte(8'hF0, ack);
@@ -195,36 +188,43 @@ module tb_i2c_slave;
         invert = 1'b0;
         check(rdata0 == ~8'hC1, "4: invert=1 returns ~0xC1 (0x3E)");
 
-        // 5. force_nack = 1 refuses the address
+        // 5. force_nack = 1 refuses address
         force_nack = 1'b1;
         bb_start;
         bb_write_byte({7'h50, 1'b0}, ack);
         bb_stop;
         force_nack = 1'b0;
         check(ack == 1'b0, "5: force_nack=1 NACKs matching address");
-
-        // 6. A 20 ns spike on SCL is ignored by the glitch filter
+// 6. 20 ns spike on SCL ignored by glitch filter
         bb_start;
-        // send 4 bits normally, inject a 20 ns high glitch while SCL is low, then finish
-        for (k = 7; k >= 4; k = k - 1)
-            bb_bit((k == 6 || k == 4), dummy); // bits 7..4 of 8'hA0 (0x50+W) = 4'b1010
-        // SCL is currently low; pulse it high for 20 ns (2 clocks < 4-clock filter)
-        #500;
-        m_scl_low = 0; #20; m_scl_low = 1;
-        #500;
-        for (k = 3; k >= 0; k = k - 1)
-            bb_bit(1'b0, dummy);
+        // send bits 7..4 of 8'hA0 (0x50 + W): 1, 0, 1, 0
         bb_bit(1'b1, dummy);
+        bb_bit(1'b0, dummy);
+        bb_bit(1'b1, dummy);
+        bb_bit(1'b0, dummy);
+
+        // Inject 20 ns high spike on SCL during the low phase
+        // (4-clock filter requires 40 ns, so 20 ns spike must be ignored)
+        m_sda_low = 1'b1; // bit 3 = 0
+        #500;
+        m_scl_low = 0; #20; m_scl_low = 1; // 20 ns glitch high
+        #(Q - 520);
+        m_scl_low = 0; #Q;
+        dummy = sda;   #Q;
+        m_scl_low = 1; #Q;
+
+        // remaining bits 2..0 (all 0) and ACK
+        bb_bit(1'b0, dummy);
+        bb_bit(1'b0, dummy);
+        bb_bit(1'b0, dummy);
+        bb_bit(1'b1, dummy); // read slave ACK
         ack = (dummy == 1'b0);
         bb_stop;
         check(ack == 1'b1, "6: 20 ns spike on SCL ignored by glitch filter");
-
-        // 7. A START in the middle of a byte restarts address reception
+        // 7. START in middle of byte restarts address reception
         bb_start;
-        // send only 4 bits of a byte
         for (k = 0; k < 4; k = k + 1)
             bb_bit(1'b1, dummy);
-        // issue a fresh START mid-byte and address 0x50+W
         bb_restart;
         bb_write_byte({7'h50, 1'b0}, ack);
         bb_stop;
