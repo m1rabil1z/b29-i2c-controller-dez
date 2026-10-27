@@ -9,6 +9,9 @@
 //
 // Use level for switches, pulse for buttons.
 // In testbenches set N small (like 16), otherwise sim takes forever.
+//
+// Registers have start values (= what the FPGA powers up with anyway), so a
+// debouncer that never gets a reset (like top_s's reset button) isn't X in sim.
 
 module debounce #(
     parameter N = 1_000_000
@@ -16,15 +19,15 @@ module debounce #(
     input  wire clk,
     input  wire rst,
     input  wire in,
-    output reg  level,
+    output reg  level = 1'b0,
     output wire pulse
 );
 
     localparam W = $clog2(N + 1);   // enough bits to count up to N
 
-    reg [1:0]   sync;
-    reg [W-1:0] cnt;
-    reg         level_d;   // level one clock ago, for the edge detect
+    reg [1:0]   sync    = 2'b00;
+    reg [W-1:0] cnt     = 0;
+    reg         level_d = 1'b0;   // level one clock ago, for the edge detect
 
     always @(posedge clk) begin
         if (rst) begin

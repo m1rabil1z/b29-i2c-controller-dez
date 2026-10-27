@@ -1,27 +1,23 @@
 `timescale 1ns/1ps
 // mode_ctrl.v
 //
-// Board M control panel. Debounces all switches and buttons and turns them
-// into settings for the master and the bridge.
+// Board M control panel. Debounces the switches and buttons and turns them
+// into settings for the master and the sequencer.
 //
-//   SW15      0 = PC in control (pyserial), 1 = board in control (switches)
-//   SW2-0     speed index when the board is in control
-//   SW3       slave select, 0 = 0x50, 1 = 0x51
-//   SW4       0 = write, 1 = read
-//   SW5       step mode (board control only)
+//   SW15      protocol ON/OFF. A transfer request from the PC waits here
+//             until this is on. (A transfer that already started finishes.)
+//   SW2-0     SCL speed (index into the table below)
+//   SW5       step mode, BTNR = one step
 //   SW14      hidden debug mode: SW13 / SW12 drive SCL / SDA directly
-//   BTNC      start a transfer (board control only)
-//   BTNR      one step (in step mode)
+//             (also forces the protocol off)
+//
+// Slave address and read/write now come from pyserial, not from switches.
 //
 // SCL speed is parameterized. Each of the 8 speeds is a frequency plus the %
 // of the period SCL stays low. The cycle counts are worked out at compile time
 // from CLK_HZ, so the FPGA only ever sees constants, no divider gets built.
 // SYNC_DELAY: the master loses 2 clocks seeing SCL go high (its 2-flop sync),
 // so we take those off t_high to get the exact frequency.
-//
-// This block never runs a transfer itself. start_pulse / slave_sel / rw go to
-// the bridge, which sends the actual commands to the master, same as for
-// pyserial packets.
 
 module mode_ctrl #(
     parameter CLK_HZ     = 100_000_000,
@@ -33,7 +29,7 @@ module mode_ctrl #(
     parameter SPD1_HZ = 1_000,    SPD1_LOW = 50,   // scope
     parameter SPD2_HZ = 10_000,   SPD2_LOW = 50,
     parameter SPD3_HZ = 50_000,   SPD3_LOW = 50,
-    parameter SPD4_HZ = 100_000,  SPD4_LOW = 50,   // standard mode, default
+    parameter SPD4_HZ = 100_000,  SPD4_LOW = 50,   // standard mode
     parameter SPD5_HZ = 200_000,  SPD5_LOW = 50,
     parameter SPD6_HZ = 300_000,  SPD6_LOW = 50,
     parameter SPD7_HZ = 400_000,  SPD7_LOW = 60    // fast mode, 60% so low >= 1.3 us
@@ -42,19 +38,14 @@ module mode_ctrl #(
     input  wire        rst,
 
     input  wire [15:0] sw,
-    input  wire        btn_start,      // BTNC
     input  wire        btn_step,       // BTNR
-    input  wire [2:0]  pc_speed_idx,   // from the bridge (SET_SPEED), bridge resets it to 4
 
-    output wire        src_sel,        // 1 = board in control
-    output wire [2:0]  speed_idx,      // speed actually in use, for the 7-seg
+    output wire        run_en,         // to the sequencer: protocol on
+    output wire [2:0]  speed_idx,      // for the 7-seg
     output reg  [24:0] t_low,          // to the master
     output reg  [24:0] t_high,
     output wire        step_mode,
     output wire        step,
-    output wire        start_pulse,    // to the bridge
-    output wire        slave_sel,
-    output wire        rw,
     output wire        dbg_en,         // to top_m: switches drive the pins
     output wire        dbg_scl_low,
     output wire        dbg_sda_low
@@ -73,11 +64,7 @@ module mode_ctrl #(
         end
     endgenerate
 
-    wire start_p, step_p;
-
-    debounce #(.N(DEB_N)) u_db_start (
-        .clk(clk), .rst(rst), .in(btn_start), .level(), .pulse(start_p)
-    );
+    wire step_p;
     debounce #(.N(DEB_N)) u_db_step (
         .clk(clk), .rst(rst), .in(btn_step), .level(), .pulse(step_p)
     );
@@ -122,26 +109,17 @@ module mode_ctrl #(
         end
     endfunction
 
-    // ---------- who's in control ----------
-    assign src_sel   = sw_lvl[15];
-    assign speed_idx = src_sel ? sw_lvl[2:0] : pc_speed_idx;
-
+    assign speed_idx = sw_lvl[2:0];
     always @(*) {t_low, t_high} = spd(speed_idx);
 
     // ---------- the rest ----------
-    assign slave_sel   = sw_lvl[3];
-    assign rw          = sw_lvl[4];
+    assign dbg_en      = sw_lvl[14];
+    assign run_en      = sw_lvl[15] & ~dbg_en;   // never run the protocol while hand-driving the pins
 
-    // step mode only under board control. If SW5 got left on, PC logs
-    // would otherwise just hang waiting for button presses.
-    assign step_mode   = sw_lvl[5] & src_sel;
+    assign step_mode   = sw_lvl[5];
     assign step        = step_p;
 
-    // BTNC only counts when the board is in control and we're not in debug
-    assign start_pulse = start_p & src_sel & ~dbg_en;
-
     // debug: switch up = line released (high), switch down = pulled low
-    assign dbg_en      = sw_lvl[14];
     assign dbg_scl_low = ~sw_lvl[13];
     assign dbg_sda_low = ~sw_lvl[12];
 

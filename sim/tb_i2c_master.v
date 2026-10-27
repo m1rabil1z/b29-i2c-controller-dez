@@ -3,7 +3,7 @@
 //
 // Tests i2c_master against two model slaves (0x50, 0x51) on one bus.
 // Run from the repo root:
-//   iverilog -o sim/tb_master.out rtl/i2c_master.v sim/models/i2c_slave_model.v sim/tb_i2c_master.v
+//   iverilog -o sim/tb_master.out rtl/i2c_master.v sim/i2c_slave_model.v sim/tb_i2c_master.v
 //   vvp sim/tb_master.out
 // Prints PASS/FAIL per check, summary at the end. Waves: tb_i2c_master.vcd
 

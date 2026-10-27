@@ -59,7 +59,7 @@ set_property -dict { PACKAGE_PIN T18  IOSTANDARD LVCMOS33 } [get_ports btnU]
 set_property -dict { PACKAGE_PIN J1   IOSTANDARD LVCMOS33 } [get_ports scl_pin]
 set_property -dict { PACKAGE_PIN L2   IOSTANDARD LVCMOS33 } [get_ports sda_pin]
 # fallback only, slow and 100 kHz:
-# set_property PULLUP true [get_ports {scl_pin sda_pin}]
+set_property PULLUP true [get_ports {scl_pin sda_pin}]
 
 set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
 set_property CONFIG_VOLTAGE 3.3 [current_design]
